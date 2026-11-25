@@ -1,0 +1,84 @@
+# The project's quality gate (scripts/gate.ps1) on a Windows runner, without the GPU tests (no graphics card here):
+# ruff, mypy, the generated contract, the web checks and pytest. The desktop app is Windows-only, so its server tests
+# run here and nowhere else in this fork.
+name: tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["feat/**"]
+
+jobs:
+  gate:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: ffmpeg
+        # a release build straight from GitHub (the Chocolatey feed timed out once and the step still passed)
+        run: |
+          $zip = "$env:RUNNER_TEMP\ffmpeg.zip"
+          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile $zip
+          Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\ffmpeg"
+          $bin = (Get-ChildItem "$env:RUNNER_TEMP\ffmpeg" -Recurse -Filter ffprobe.exe | Select-Object -First 1).DirectoryName
+          if (-not $bin) { throw "ffprobe.exe not found in the download" }
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+          & "$bin\ffprobe.exe" -version | Select-Object -First 1
+
+      - name: Python environment
+        run: |
+          . ./scripts/env.ps1
+          uv sync --python 3.11
+
+      - name: Web dependencies
+        run: |
+          . ./scripts/env.ps1
+          Set-Location web
+          npm ci --no-audit --no-fund
+
+      - name: ruff check
+        run: |
+          . ./scripts/env.ps1
+          .venv\Scripts\python.exe -m ruff check .
+
+      - name: ruff format
+        run: |
+          . ./scripts/env.ps1
+          .venv\Scripts\python.exe -m ruff format --check .
+
+      - name: mypy
+        run: |
+          . ./scripts/env.ps1
+          .venv\Scripts\python.exe -m mypy
+
+      - name: contract fresh
+        run: |
+          . ./scripts/env.ps1
+          .venv\Scripts\python.exe scripts\gen_types.py --check
+
+      - name: web lint, types, tests, fresh
+        run: |
+          . ./scripts/env.ps1
+          foreach ($step in "lint", "types", "test", "fresh") {
+            .venv\Scripts\python.exe scripts\web_check.py $step
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: pytest
+        run: |
+          . ./scripts/env.ps1
+          .venv\Scripts\python.exe -X utf8 -m pytest -p no:cacheprovider
